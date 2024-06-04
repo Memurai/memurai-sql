@@ -1,0 +1,263 @@
+name: Build
+
+on:
+  workflow_dispatch:
+#  push:
+#  pull_request:
+
+jobs:
+  ubuntu-build:
+    env:
+      buildDir: ${{ github.workspace }}/build
+    name: ubuntu-build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: get-cmake
+        uses: lukka/get-cmake@v3.21.2
+
+      - name: Install GCC & G++ 11 compiler
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: 11
+          platform: x64
+
+      - name: Set GCC & G++ 11 compiler
+        run: echo "CC=gcc-11" >> $GITHUB_ENV && echo "CXX=g++-11" >> $GITHUB_ENV
+
+      - name: Run cmake
+        run: mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE:STRING="Release" -GNinja ..
+
+      - name: Build memurai-sql
+        run: ninja
+        working-directory: ${{ env.buildDir }}
+
+      - name: Cache Ubuntu build
+        id: cache-build-linux
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-linux-${{ github.run_id }}-${{ github.run_number }}
+
+  ubuntu-unit-tests:
+    if: ${{ github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') }}
+    needs: ubuntu-build
+    env:
+      buildDir: ${{ github.workspace }}/build
+    name: ubuntu-unit-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install GCC & G++ 11 compiler
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: 11
+          platform: x64
+
+      - name: Set GCC & G++ 11 compiler
+        run: echo "CC=gcc-11" >> $GITHUB_ENV && echo "CXX=g++-11" >> $GITHUB_ENV
+
+      - name: Load build cache
+        id: cache-build-linux
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-linux-${{ github.run_id }}-${{ github.run_number }}
+
+      - name: Run unit tests
+        run: ctest -V
+        working-directory: ${{ env.buildDir }}
+
+  ubuntu-system-tests:
+    if: ${{ github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') }}
+    needs: ubuntu-build
+    env:
+      buildDir: ${{ github.workspace }}/build
+    name: ubuntu-system-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: get-cmake
+        uses: lukka/get-cmake@v3.21.2
+
+      - name: Install GCC & G++ 11 compiler
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: 11
+          platform: x64
+
+      - name: Install Redis server
+        run: |
+          sudo add-apt-repository ppa:redislabs/redis
+          sudo apt-get update
+          sudo apt-get -y install redis ninja-build
+
+      - name: Load build cache
+        id: cache-build-linux
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-linux-${{ github.run_id }}-${{ github.run_number }}
+
+      - name: Install Memurai-sql library
+        run: sudo ninja install
+        working-directory: ${{ env.buildDir }}
+
+      - name: Load Memurai-sql
+        run: redis-cli module load /usr/lib/redis/modules/libmemurai-sql.so
+
+      - name: Run system tests
+        run: ./system-tests
+        working-directory: ${{ env.buildDir }}/system-tests
+
+  ubuntu-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ubuntu-unit-tests, ubuntu-system-tests]
+    env:
+      buildDir: ${{ github.workspace }}/build
+    name: ubuntu-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: get-cmake
+        uses: lukka/get-cmake@v3.21.2
+
+      - name: Load build cache
+        id: cache-build-linux
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-linux-${{ github.run_id }}-${{ github.run_number }}
+
+      - name: Create deb archive
+        run: cpack
+        working-directory: ${{ env.buildDir }}
+
+      - name: Create tar.gz archive with library
+        run: tar -czf memurai-sql-linux-amd64.tar.gz libmemurai-sql.so
+        working-directory: ${{ env.buildDir }}/sql-fe
+
+      - name: Upload artifact
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ env.buildDir }}/sql-fe/memurai-sql-linux-amd64.tar.gz
+            ${{ env.buildDir }}/*.deb
+
+  windows-build:
+    env:
+      buildDir: ${{ github.workspace }}/build
+    name: windows-build
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      # ninja is needed for building (because it's preferable, not a hard requirement)
+      - name: install additional required packages with chocolatey
+        run: |
+          choco install ninja
+
+      - name: get-cmake
+        uses: lukka/get-cmake@v3.21.2
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v1.1
+
+      # NOTE: this is necessary to correctly find and use cl.exe with the Ninja generator for now
+      - name: setup devcmd
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run cmake
+        run: mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE:STRING="Release" -DCMAKE_CXX_COMPILER=cl -DCMAKE_C_COMPILER=cl -GNinja ..
+
+      - name: Build memurai-sql
+        run: ninja
+        working-directory: ${{ env.buildDir }}
+
+      - name: Cache Windows build
+        id: cache-build-windows
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-windows-${{ github.run_id }}-${{ github.run_number }}
+
+  windows-unit-tests:
+    if: ${{ github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') }}
+    needs: windows-build
+    env:
+       buildDir: ${{ github.workspace }}/build
+    name: windows-unit-tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Load build cache
+        id: cache-build-windows
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-windows-${{ github.run_id }}-${{ github.run_number }}
+
+      - name: Run unit tests
+        run: ctest -V
+        working-directory: ${{ env.buildDir }}
+
+  windows-system-tests:
+    if: ${{ github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') }}
+    needs: windows-build
+    env:
+      buildDir: ${{ github.workspace }}/build
+    name: windows-system-tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Install Memurai server
+        run: choco install -y memurai-developer
+
+      - name: Load build cache
+        id: cache-build-windows
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-windows-${{ github.run_id }}-${{ github.run_number }}
+
+      - name: Give folder permissions to module
+        run: |
+            "icacls ${{ env.buildDir }}/sql-fe /grant NetworkService:(OI)(CI)F /T"
+
+      - name: Load Memurai-sql
+        run: .\memurai-cli.exe module load ${{ env.buildDir }}/sql-fe/memurai-sql.dll
+        working-directory: "C:/Program Files/Memurai"
+
+      - name: Run system tests
+        run: .\system-tests.exe
+        working-directory: ${{ env.buildDir }}/system-tests
+
+  windows-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-unit-tests,windows-system-tests]
+    env:
+       buildDir: ${{ github.workspace }}/build
+    name: windows-release
+    runs-on: windows-latest
+
+    steps:
+      - name: Load build cache
+        id: cache-build-windows
+        uses: actions/cache@v2
+        with:
+          path: ${{ env.buildDir }}
+          key: build-windows-${{ github.run_id }}-${{ github.run_number }}
+
+      - name: Create zip archive
+        run: powershell Compress-Archive memurai-sql.dll memurai-sql-windows.zip
+        working-directory: ${{ env.buildDir }}/sql-fe
+
+      - name: Upload artifact
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.buildDir }}/sql-fe/memurai-sql-windows.zip
